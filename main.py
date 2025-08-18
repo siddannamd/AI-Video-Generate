@@ -1,0 +1,199 @@
+import os
+import time
+import httpx
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
+
+load_dotenv()
+API_KEY = os.getenv("MODELSLAB_API_KEY")
+TEXT2VIDEO_URL = "https://modelslab.com/api/v6/video/text2video"
+FETCH_URL_TEMPLATE = "https://modelslab.com/api/v6/video/fetch/{id}"
+
+app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Video Generator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(to right, #667eea, #764ba2);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+        h1 {
+            margin-top: 50px;
+            font-size: 3rem;
+            text-shadow: 2px 2px 8px rgba(0,0,0,0.4);
+        }
+        form {
+            margin-top: 30px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: rgba(0,0,0,0.3);
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+        }
+        input[type="text"] {
+            padding: 15px 20px;
+            width: 400px;
+            border-radius: 10px;
+            border: none;
+            margin-bottom: 20px;
+            font-size: 1.1rem;
+        }
+        button {
+            padding: 12px 30px;
+            font-size: 1.1rem;
+            color: #fff;
+            background: #ff416c;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background: #ff4b2b;
+            transform: scale(1.05);
+        }
+        .video-container {
+            margin-top: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        video {
+            border-radius: 15px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+            max-width: 90vw;
+            margin-top: 20px;
+        }
+        a {
+            margin-top: 15px;
+            color: #ffd700;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .spinner {
+            border: 8px solid rgba(255, 255, 255, 0.2);
+            border-top: 8px solid #fff;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+            margin-top: 30px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg);}
+            100% { transform: rotate(360deg);}
+        }
+    </style>
+    </head>
+    <body>
+
+    <h1>AI Video Generator</h1>
+
+    <form id="promptForm" action="/generate" method="post">
+        <input type="text" name="prompt" placeholder="Enter a creative prompt..." required>
+        <button type="submit">Generate Video</button>
+    </form>
+
+    <div class="video-container" id="videoContainer"></div>
+
+    <script>
+        const form = document.getElementById('promptForm');
+        const videoContainer = document.getElementById('videoContainer');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Show spinner while generating
+            videoContainer.innerHTML = '<div class="spinner"></div><p>Generating your video... Please wait!</p>';
+
+            const formData = new FormData(form);
+
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const html = await response.text();
+                videoContainer.innerHTML = html;
+
+            } catch (error) {
+                videoContainer.innerHTML = '<p style="color:red;">Error generating video. Please try again.</p>';
+            }
+        });
+    </script>
+
+    </body>
+    </html>
+    """
+
+@app.post("/generate", response_class=HTMLResponse)
+async def generate(prompt: str = Form(...)):
+    # Step 1: Request generation
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(TEXT2VIDEO_URL, json={
+            "key": API_KEY,
+            "model_id": "cogvideox",
+            "prompt": prompt,
+            "num_frames": 16,
+            "height": 512,
+            "width": 512,
+            "output_type": "mp4"
+        })
+        result = resp.json()
+
+    if result.get("status") == "processing":
+        fetch_url = FETCH_URL_TEMPLATE.format(id=result["id"])
+        eta = result.get("eta", 30)
+
+        async with httpx.AsyncClient() as client:
+            for _ in range(int(eta / 5) + 1):
+                fetch_resp = await client.post(fetch_url, json={"key": API_KEY})
+                fetch_result = fetch_resp.json()
+
+                if fetch_result.get("status") == "success":
+                    video_url = fetch_result["output"][0]
+                    return f"""
+                    <html><body style="text-align:center;">
+                      <h2>Generated for: {prompt}</h2>
+                      <video src="{video_url}" width="512" controls autoplay></video>
+                      <br><a href="/">Try another</a>
+                    </body></html>
+                    """
+                time.sleep(5)
+
+        return f"<h3>Still generating. Try again later or use fetch URL: {fetch_url}</h3>"
+
+    elif result.get("status") == "success":
+        video_url = result["output"][0]
+        return f"""
+        <html><body style="text-align:center;">
+          <h2>Generated for: {prompt}</h2>
+          <video src="{video_url}" width="512" controls autoplay></video>
+          <br><a href="/">Try another</a>
+        </body></html>
+        """
+    else:
+        return f"<h3>Error: {result}</h3>"
